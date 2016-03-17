@@ -1,0 +1,2 @@
+# konf
+basic configuration
