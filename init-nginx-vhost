@@ -1,0 +1,165 @@
+#!/bin/bash
+
+WARNING='\e[0;33m'
+NC='\e[0m'
+
+usage() {
+    echo "Usage $0 [-d domain] [-s subdomain] [-p /path/web/source]" 1>&2; exit 1;
+}
+
+
+while getopts ":d:p:s:" o; do
+    case "${o}" in
+        d) 
+            domain=${OPTARG}
+            ;;
+        s)
+            subdomain=${OPTARG}
+            ;;
+        p)
+            sourcePath=${OPTARG}
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+if [ -z "${subdomain}" ]; then
+    hostname="${domain}"
+else
+    hostname="${subdomain}.${domain}"
+fi
+
+
+if [ -z "${domain}" ] || [ -z "${sourcePath}" ]; then
+    usage
+fi
+
+initFile() {
+    if [ ! -d "${sourcePath}"  ];then 
+        mkdir $sourcePath && echo "create directory ${sourcePath}"
+    else
+        echo "Source path is exist"
+        exit 1;
+    fi
+
+    if [ ! -f "/etc/nginx/sites-available/${hostname}" ]; then
+        touch "/etc/nginx/sites-available/${hostname}" && echo "create vhost file /etc/nginx/${hostname}"
+    else
+        echo "Virtualhost is exist"
+        exit 1;
+    fi
+
+    if [ ! -f "/etc/php5/fpm/pool.d/${hostname}.conf" ]; then
+        touch "/etc/php5/fpm/pool.d/${hostname}.conf" && echo "create vhost file /etc/nginx/${hostname}"
+    else
+        echo "Virtualhost is exist"
+        exit 1;
+    fi
+}
+
+putVhostContent() {
+cat <<EOT >> /etc/nginx/sites-available/${hostname}
+server {
+    charset utf-8;
+    client_max_body_size 128M;
+
+    listen 80; ## listen for ipv4
+
+    server_name ${hostname};
+    root        ${sourcePath};
+    index       index.php;
+
+    access_log  /var/log/nginx/${hostname}_access.log;
+    error_log   /var/log/nginx/${hostname}_error.log;
+
+    location / {
+        try_files \$uri \$uri/ /index.php\$is_args\$args;
+    }
+
+    location ~ \\.php$ {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_pass unix:/var/run/php5-fpm-${hostname}.sock;
+        try_files \$uri =404;
+    }
+
+    location ~ /\.(ht|svn|git) {
+        deny all;
+    }
+}
+EOT
+}
+
+putFPMContent() {
+    cat <<EOT >> "/etc/php5/fpm/pool.d/${hostname}.conf"
+[${hostname}]
+user = ${hostname}
+group = ${domain}
+listen = /var/run/php5-fpm-${hostname}.sock
+listen.owner = www-data
+listen.group = www-data
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system
+php_admin_flag[allow_url_fopen] = off
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+chdir = /
+EOT
+}
+
+addGroup() {
+    if grep -q $domain /etc/group; then
+        echo -e "${WARNING} Group ${domain} are exist${NC}"
+    else 
+        groupadd $domain && echo "Add group ${domain}"
+    fi
+}
+
+addUser() {
+    if id "${hostname}" > /dev/null 2>&1; then
+        echo -e "${WARNING} User ${hostname} are exist${NC}"
+    else 
+        useradd -M -s /usr/bin/nologin -g ${domain} ${hostname} && echo "Add user ${hostname} to ${domain} group"
+    fi
+}
+
+setPermission() {
+    chown "${hostname}:${domain}" $sourcePath
+    setfacl -d -m "g:developer:rwx" $sourcePath
+
+    setfacl -d -m "u:${hostname}:rwx" $sourcePath
+    setfacl -d -m "g:${domain}:rwx" $sourcePath
+    setfacl -d -m "o::rx" $sourcePath
+
+    setfacl -m "u:${hostname}:rwx" $sourcePath
+    setfacl -m "g:${domain}:rwx" $sourcePath
+    setfacl -m "o::rx" $sourcePath
+
+    setfacl -m "g:developer:rwx" $sourcePath
+}
+
+enableVhost() {
+    ln -svf "/etc/nginx/sites-available/${hostname}" "/etc/nginx/sites-enabled/${hostname}"
+}
+
+reloadService() {
+    service nginx reload
+    service php5-fpm stop
+    pkill php5-fpm 
+    service php5-fpm start
+}
+
+initFile && echo "Init files complete..."
+putVhostContent && echo "Add vhost content complete..."
+putFPMContent && echo "Add FPM content complete..."
+addGroup && echo "Add Group complete..."
+addUser && echo "Add User complete..."
+setPermission && echo "Set permission complete..."
+enableVhost && echo "Enable Vhost complete..."
+reloadService && echo "Reload serice complete..."
